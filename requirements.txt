@@ -1,0 +1,15 @@
+# DRS Auto Race Bot - Dependencies
+# Install with: pip install -r requirements.txt
+
+# Image processing
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# OCR for reading fuel
+easyocr>=1.7.0
+
+# TOML parsing (Python 3.10 compatibility)
+tomli>=2.0.0
+
+# Discord webhook notifications
+aiohttp>=3.9.0

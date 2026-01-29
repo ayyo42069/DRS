@@ -1,0 +1,89 @@
+# DRS Auto Race Bot Configuration
+# These values are loaded when the bot starts
+
+[window]
+# Game window title (partial match supported)
+title = "Drag Racing: Streets"
+
+[bot]
+# Minimum fuel required to start racing
+min_fuel = 10
+
+# Fuel cost per race
+fuel_per_race = 5
+
+# Maximum fuel capacity
+max_fuel = 75
+
+# Seconds for 1 fuel to regenerate (3 minutes = 180s)
+fuel_regen_seconds = 180.0
+
+[timing]
+# Delay for screen transitions (seconds)
+transition_delay = 2.5
+
+# Time per race (seconds)
+race_duration = 30.0
+
+# Extra buffer after races complete (seconds)
+race_buffer_time = 5.0
+
+# Interval to check fuel when waiting (seconds)
+fuel_check_interval = 60.0
+
+[matching]
+# Template matching threshold (lower = more lenient, 0.0-1.0)
+threshold = 0.6
+
+# Scales to try for multi-resolution matching (comma-separated)
+# Lower values = smaller template, Higher values = larger template
+scales = "0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4"
+
+# Target width to resize window to before matching (0 = disable)
+# Set this to the width of the screen where you captured the templates (e.g. 1920 or 1600)
+# This makes detection work regardless of window size/DPI!
+target_width = 1920
+
+[adb]
+# Use ADB for clicks (allows background clicking without stealing mouse)
+enabled = true
+
+# ADB Device Address (usually 127.0.0.1:5555 for BlueStacks, 7555 for MuMu/LDPlayer)
+address = "127.0.0.1:7555"
+
+# Android package name to launch
+package_name = "mobi.square.sr.android"
+
+# Seconds to wait for game to boot after launching (2-3 minutes recommended)
+boot_wait_seconds = 70
+
+[schedule]
+# Daily restart settings - game will be restarted once per day at this time
+# Enable/disable daily scheduled restart
+daily_restart_enabled = true
+
+# Hour to restart (0-23, in UTC+1 timezone)
+daily_restart_hour = 6
+
+# Minute to restart (0-59)
+daily_restart_minute = 0
+
+# Last daily restart timestamp (auto-updated by bot, do not edit manually)
+last_daily_restart = "2026-01-29T06:33:00+01:00"
+
+[debug]
+# Save cropped images for debugging (fuel crops, template matches)
+save_images = false
+
+[discord]
+# Enable Discord webhook notifications
+enabled = true
+
+# Discord webhook URL (get this from your Discord server settings)
+webhook_url = "Keep this secret!"
+
+# What to send to Discord
+send_race_start = true
+send_race_complete = true
+send_fuel_wait = true
+send_errors = true
