@@ -179,6 +179,30 @@ class AdbController:
         except OSError as e:
             print(f"[ADB] Tap failed: {e}")
 
+    def get_main_activity(self, package_name: str) -> Optional[str]:
+        """Get the main launchable activity for a package."""
+        if not self.connected:
+            return None
+        
+        try:
+            # Method 1: cmd package resolve-activity (Android 7+)
+            # Output format:
+            # com.package/com.package.Activity
+            cmd = ["adb", "-s", self.device_address, "shell", "cmd", "package", "resolve-activity", "--brief", package_name]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5)
+            
+            if result.returncode == 0 and result.stdout:
+                lines = result.stdout.strip().split('\n')
+                # Look for the activity component
+                for line in reversed(lines):
+                    if '/' in line and package_name in line:
+                        return line.strip()
+            
+            return None
+            
+        except (subprocess.TimeoutExpired, OSError, IndexError):
+            return None
+
     def launch_app(self, package_name: str) -> bool:
         """Launch an app by package name."""
         if not self.connected:
@@ -186,7 +210,21 @@ class AdbController:
             
         try:
             print(f"[ADB] Launching {package_name}...")
-            # Use monkey to launch the app (works even if we don't know the main activity)
+            
+            # Method 1: Try specific activity launch
+            activity = self.get_main_activity(package_name)
+            if activity:
+                print(f"[ADB] Found main activity: {activity}")
+                # Force stop before start to ensure clean launch
+                # (Optional, but often helps with 'relaunch' behavior)
+                
+                cmd = ["adb", "-s", self.device_address, "shell", "am", "start", "-n", activity]
+                subprocess.run(cmd, capture_output=True, check=False, timeout=10)
+                return True
+            
+            # Method 2: Monkey (Fallback)
+            print("[ADB] Falling back to monkey launch...")
+            # Use monkey to launch the app 
             cmd = [
                 "adb", "-s", self.device_address, "shell", "monkey",
                 "-p", package_name, "-c", "android.intent.category.LAUNCHER", "1"
