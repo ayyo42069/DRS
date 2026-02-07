@@ -4,19 +4,22 @@ Enhanced with rich embeds, timestamps, and detailed stats.
 """
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
+    import aiohttp
 
 # Lazy-loaded modules
-_session = None
+_session: Optional["aiohttp.ClientSession"] = None
+_aiohttp = None
 _cv2 = None
 
-# Bot version
-BOT_VERSION = "4.1"
+# Import version from package
+from . import __version__ as BOT_VERSION
 
 
 def _get_cv2():
@@ -28,11 +31,20 @@ def _get_cv2():
     return _cv2
 
 
+def _get_aiohttp():
+    """Lazy load aiohttp module."""
+    global _aiohttp
+    if _aiohttp is None:
+        import aiohttp
+        _aiohttp = aiohttp
+    return _aiohttp
+
+
 async def _get_session():
     """Lazy load aiohttp session."""
     global _session
     if _session is None:
-        import aiohttp
+        aiohttp = _get_aiohttp()
         _session = aiohttp.ClientSession()
     return _session
 
@@ -87,6 +99,19 @@ class DiscordNotifier:
             return f"{mins}m {secs}s"
         else:
             return f"{secs}s"
+    
+    def _get_common_fields(self, include_time: bool = False) -> List[Dict[str, Any]]:
+        """Create commonly used embed fields (session races, uptime, optionally time)."""
+        now = datetime.now(self.TIMEZONE)
+        fields = []
+        
+        if include_time:
+            fields.append({"name": "🕐 Time", "value": now.strftime("%H:%M:%S"), "inline": True})
+        
+        fields.append({"name": "📊 Session Races", "value": str(self._total_races), "inline": True})
+        fields.append({"name": "⏱️ Uptime", "value": self._get_uptime_str(), "inline": True})
+        
+        return fields
     
     def _encode_image(self, image: np.ndarray) -> Optional[bytes]:
         """Encode numpy image to PNG bytes."""
@@ -152,9 +177,7 @@ class DiscordNotifier:
             return
         
         try:
-            import aiohttp
-            import json
-            
+            aiohttp = _get_aiohttp()
             session = await _get_session()
             
             # Prepare form data
@@ -189,8 +212,14 @@ class DiscordNotifier:
                     text = await resp.text()
                     print(f"[WARNING] Discord webhook failed: {resp.status} - {text[:100]}")
                     
-        except (aiohttp.ClientError, ValueError, RuntimeError) as e:
+        except (ValueError, RuntimeError, OSError) as e:
             print(f"[WARNING] Discord notification failed: {e}")
+        except Exception as e:
+            # Catch aiohttp-specific errors without requiring global import
+            if "aiohttp" in type(e).__module__:
+                print(f"[WARNING] Discord HTTP error: {e}")
+            else:
+                raise
     
     async def notify_started(
         self,
@@ -343,9 +372,8 @@ class DiscordNotifier:
         fields: Optional[List[Dict[str, Any]]] = None
     ) -> None:
         """Send a debug notification with optional screenshot."""
-        all_fields = fields or []
-        all_fields.append({"name": "📊 Session Races", "value": str(self._total_races), "inline": True})
-        all_fields.append({"name": "⏱️ Uptime", "value": self._get_uptime_str(), "inline": True})
+        all_fields = list(fields) if fields else []
+        all_fields.extend(self._get_common_fields())
         
         embed = self._create_embed(
             title=f"🔧 {title}",
@@ -363,13 +391,14 @@ class DiscordNotifier:
         session_races: int = 0
     ) -> None:
         """Notify an error occurred with context."""
-        now = datetime.now(self.TIMEZONE)
-        
-        fields = [
-            {"name": "🕐 Time", "value": now.strftime("%H:%M:%S"), "inline": True},
-            {"name": "📊 Session Races", "value": str(session_races or self._total_races), "inline": True},
-            {"name": "⏱️ Uptime", "value": self._get_uptime_str(), "inline": True},
-        ]
+        # Use common fields helper with time included
+        fields = self._get_common_fields(include_time=True)
+        # Override session races if explicitly provided
+        if session_races:
+            for field in fields:
+                if field["name"] == "📊 Session Races":
+                    field["value"] = str(session_races)
+                    break
         
         embed = self._create_embed(
             title=f"⚠️ {error_type}",

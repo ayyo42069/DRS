@@ -82,6 +82,13 @@ class FuelReader:
         'B': '8',
     }
     
+    # Pre-compiled regex patterns for performance
+    _RE_CLEAN_TEXT = re.compile(r'[^0-9\s/\\:]')
+    _RE_STANDARD_FUEL = re.compile(r"(\d{1,3})\s*[/\\]")
+    _RE_TIMER_FUEL = re.compile(r"(\d{1,2})\s*[/\\]\s*\d+:\d+")
+    _RE_TIMER_PATTERN = re.compile(r'\d+:\d+')
+    _RE_NON_DIGIT = re.compile(r'[^0-9\s]')
+    
     def __init__(self, max_fuel: int = 150):
         """
         Initialize fuel reader.
@@ -188,10 +195,10 @@ class FuelReader:
             text = text.replace(wrong, correct)
         
         # Keep colons to detect timer patterns, remove other special chars
-        text_for_analysis = re.sub(r'[^0-9\s/\\:]', '', text)
+        text_for_analysis = self._RE_CLEAN_TEXT.sub('', text)
         
         # Pattern 1: Standard fuel format "XX/YY" - number before slash
-        match = re.search(r"(\d{1,3})\s*[/\\]", text_for_analysis)
+        match = self._RE_STANDARD_FUEL.search(text_for_analysis)
         if match:
             try:
                 current = int(match.group(1))
@@ -203,7 +210,7 @@ class FuelReader:
         # Pattern 2: Low fuel with timer - look for single digit before slash+colon pattern
         # Format: "X/ Y:ZZ" where X is fuel, Y:ZZ is timer
         # OCR might read this as "4 / 2:15" or "1/ 3:00"
-        timer_match = re.search(r"(\d{1,2})\s*[/\\]\s*\d+:\d+", text_for_analysis)
+        timer_match = self._RE_TIMER_FUEL.search(text_for_analysis)
         if timer_match:
             try:
                 current = int(timer_match.group(1))
@@ -234,8 +241,8 @@ class FuelReader:
         
         # Pattern 4: Fallback - any standalone number that's reasonable for fuel
         # Remove colon-based patterns first (timer digits)
-        text_no_timer = re.sub(r'\d+:\d+', '', text_for_analysis)
-        text_no_timer = re.sub(r'[^0-9\s]', '', text_no_timer)
+        text_no_timer = self._RE_TIMER_PATTERN.sub('', text_for_analysis)
+        text_no_timer = self._RE_NON_DIGIT.sub('', text_no_timer)
         
         parts = text_no_timer.strip().split()
         if parts:

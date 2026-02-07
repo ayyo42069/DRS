@@ -40,14 +40,35 @@ class WindowInfo:
 class AdbController:
     """Handles ADB connection and input."""
     
-    # Connection timeout in seconds
+    # Timeout constants (seconds)
     CONNECT_TIMEOUT = 10
+    QUICK_TIMEOUT = 5      # For simple queries
+    NORMAL_TIMEOUT = 10    # For standard operations
+    SCREENCAP_TIMEOUT = 10 # For screen capture
     
     def __init__(self, device_address: str = "127.0.0.1:7555"):
         self.device_address = device_address
         self.connected = False
         self.width = 0
         self.height = 0
+    
+    def _run_shell(self, *args: str, timeout: Optional[int] = None, text: bool = True) -> Optional[subprocess.CompletedProcess]:
+        """Run an ADB shell command with standard error handling."""
+        if not self.connected:
+            return None
+        
+        cmd = ["adb", "-s", self.device_address, "shell", *args]
+        try:
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=text,
+                check=False,
+                timeout=timeout or self.NORMAL_TIMEOUT
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            print(f"[ADB] Command failed: {e}")
+            return None
         
     def connect(self) -> bool:
         """Connect to ADB device."""
@@ -93,18 +114,11 @@ class AdbController:
             
     def update_resolution(self) -> None:
         """Get device resolution."""
-        if not self.connected:
+        result = self._run_shell("wm", "size", timeout=self.QUICK_TIMEOUT)
+        if result is None:
             return
-            
+        
         try:
-            result = subprocess.run(
-                ["adb", "-s", self.device_address, "shell", "wm", "size"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5
-            )
-            
             # Output format: "Physical size: 1920x1080"
             if result.returncode == 0 and "size:" in result.stdout:
                 parts = result.stdout.strip().split(":")[-1].strip().split("x")
@@ -112,8 +126,8 @@ class AdbController:
                     self.width = int(parts[0])
                     self.height = int(parts[1])
                     print(f"[ADB] Device resolution: {self.width}x{self.height}")
-        except (subprocess.TimeoutExpired, ValueError, IndexError) as e:
-            print(f"[ADB] Failed to get resolution: {e}")
+        except (ValueError, IndexError) as e:
+            print(f"[ADB] Failed to parse resolution: {e}")
 
     def screencap(self) -> Optional[np.ndarray]:
         """
@@ -237,90 +251,58 @@ class AdbController:
 
     def stop_app(self, package_name: str) -> bool:
         """Force stop an app."""
-        if not self.connected:
-            return False
-            
-        try:
-            print(f"[ADB] Stopping {package_name}...")
-            cmd = ["adb", "-s", self.device_address, "shell", "am", "force-stop", package_name]
-            subprocess.run(cmd, capture_output=True, check=False, timeout=10)
-            return True
-        except (subprocess.TimeoutExpired, OSError) as e:
-            print(f"[ADB] Stop failed: {e}")
-            return False
+        print(f"[ADB] Stopping {package_name}...")
+        result = self._run_shell("am", "force-stop", package_name)
+        return result is not None
     
     def is_app_running(self, package_name: str) -> bool:
         """Check if an app is currently running (has a process)."""
-        if not self.connected:
+        result = self._run_shell("pidof", package_name, timeout=self.QUICK_TIMEOUT)
+        if result is None:
             return False
-        
-        try:
-            cmd = ["adb", "-s", self.device_address, "shell", "pidof", package_name]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5)
-            # If pidof returns a PID, the app is running
-            return result.returncode == 0 and result.stdout.strip().isdigit()
-        except (subprocess.TimeoutExpired, OSError):
-            return False
+        # If pidof returns a PID, the app is running
+        return result.returncode == 0 and result.stdout.strip().isdigit()
     
     def is_app_foreground(self, package_name: str) -> bool:
         """Check if an app is in the foreground (visible on screen)."""
-        if not self.connected:
-            return False
+        # Get the currently focused activity
+        result = self._run_shell("dumpsys", "activity", "activities", timeout=self.QUICK_TIMEOUT)
         
-        try:
-            # Get the currently focused activity
-            cmd = ["adb", "-s", self.device_address, "shell", 
-                   "dumpsys", "activity", "activities", "|", "grep", "mResumedActivity"]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5, shell=True)
-            
-            if result.returncode == 0:
-                return package_name in result.stdout
-            
-            # Fallback: check window focus
-            cmd2 = ["adb", "-s", self.device_address, "shell", 
-                    "dumpsys", "window", "windows", "|", "grep", "-E", "mCurrentFocus|mFocusedApp"]
-            result2 = subprocess.run(cmd2, capture_output=True, text=True, check=False, timeout=5, shell=True)
-            return package_name in result2.stdout
-            
-        except (subprocess.TimeoutExpired, OSError):
-            return False
-    
-    def clear_app_cache(self, package_name: str) -> bool:
-        """Clear app cache (not data) to free memory."""
-        if not self.connected:
-            return False
+        if result and result.returncode == 0:
+            # Filter for mResumedActivity in Python instead of shell grep
+            for line in result.stdout.split('\n'):
+                if 'mResumedActivity' in line and package_name in line:
+                    return True
         
-        try:
-            print(f"[ADB] Clearing cache for {package_name}...")
-            # This clears cache without affecting user data
-            cmd = ["adb", "-s", self.device_address, "shell", "pm", "clear", "--cache-only", package_name]
-            result = subprocess.run(cmd, capture_output=True, check=False, timeout=10)
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, OSError) as e:
-            print(f"[ADB] Clear cache failed: {e}")
-            return False
+        # Fallback: check window focus
+        result2 = self._run_shell("dumpsys", "window", "windows", timeout=self.QUICK_TIMEOUT)
+        
+        if result2 and result2.returncode == 0:
+            # Filter for focus indicators in Python
+            for line in result2.stdout.split('\n'):
+                if ('mCurrentFocus' in line or 'mFocusedApp' in line) and package_name in line:
+                    return True
+
+        return False
     
     def get_memory_info(self, package_name: str) -> Optional[int]:
         """Get app memory usage in MB."""
-        if not self.connected:
+        result = self._run_shell("dumpsys", "meminfo", package_name)
+        if result is None or result.returncode != 0:
             return None
         
         try:
-            cmd = ["adb", "-s", self.device_address, "shell", "dumpsys", "meminfo", package_name]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=10)
-            
-            if result.returncode == 0:
-                # Look for "TOTAL:" line which shows total memory in KB
-                for line in result.stdout.split('\n'):
-                    if 'TOTAL:' in line.upper() or 'TOTAL ' in line.upper():
-                        # Extract the number
-                        parts = line.split()
-                        for part in parts:
-                            if part.isdigit():
-                                return int(part) // 1024  # Convert KB to MB
-            return None
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            return None
+            # Look for "TOTAL:" line which shows total memory in KB
+            for line in result.stdout.split('\n'):
+                if 'TOTAL:' in line.upper() or 'TOTAL ' in line.upper():
+                    # Extract the number
+                    parts = line.split()
+                    for part in parts:
+                        if part.isdigit():
+                            return int(part) // 1024  # Convert KB to MB
+        except ValueError:
+            pass
+        return None
 
 
 class WindowManager:
@@ -332,11 +314,11 @@ class WindowManager:
     
     def __init__(
         self,
-        title_pattern: str,
+        title_pattern: str,  # Kept for API compatibility, not used with ADB
         use_adb: bool = False,
         adb_address: str = "127.0.0.1:7555"
     ):
-        self.title_pattern = title_pattern
+        # Note: title_pattern is not used in ADB mode but kept for API compatibility
         self.current_window: Optional[WindowInfo] = None
         
         # ADB Support
@@ -346,8 +328,8 @@ class WindowManager:
             self.adb = AdbController(adb_address)
             self.adb.connect()
 
-    def find_window(self, debug: bool = True) -> Optional[WindowInfo]:
-        """Check if ADB is connected and device is online."""
+    def find_window(self) -> Optional[WindowInfo]:
+        """Check if ADB is connected and device is available."""
         if self.adb and self.adb.connected:
             # If ADB is connected, create a virtual WindowInfo for compatibility
             if self.adb.width == 0 or self.adb.height == 0:

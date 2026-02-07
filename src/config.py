@@ -8,7 +8,8 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import List, Optional
+import re
+from typing import Any, List, Optional
 
 try:
     import tomllib
@@ -25,7 +26,6 @@ def get_base_dir() -> Path:
 
 class ConfigError(Exception):
     """Raised when configuration is invalid or missing required values."""
-    pass
 
 
 @dataclass
@@ -85,7 +85,7 @@ class Config:
     _config_path: Optional[Path] = field(default=None, repr=False)
     
     @classmethod
-    def _get_required(cls, data: dict, section: str, key: str) -> any:
+    def _get_required(cls, data: dict, section: str, key: str) -> Any:
         """Get a required config value with helpful error message."""
         if section not in data:
             raise ConfigError(f"Missing required config section: [{section}]")
@@ -94,7 +94,7 @@ class Config:
         return data[section][key]
     
     @classmethod
-    def _get_optional(cls, data: dict, section: str, key: str, default: any) -> any:
+    def _get_optional(cls, data: dict, section: str, key: str, default: Any) -> Any:
         """Get an optional config value with default."""
         return data.get(section, {}).get(key, default)
     
@@ -206,7 +206,7 @@ class Config:
             ts_str = timestamp.isoformat()
             
             # Update or add the last_daily_restart line
-            import re
+            # Use pre-imported re module
             if 'last_daily_restart' in content:
                 # Replace existing line
                 content = re.sub(

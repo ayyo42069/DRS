@@ -5,9 +5,32 @@ from __future__ import annotations
 
 import asyncio
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
 from typing import Optional, Tuple, TYPE_CHECKING
+
+# Lazy-loaded modules
+_cv2 = None
+_np = None
+
+
+def _get_cv2():
+    """Lazy load cv2."""
+    global _cv2
+    if _cv2 is None:
+        import cv2
+        _cv2 = cv2
+    return _cv2
+
+
+def _get_np():
+    """Lazy load numpy."""
+    global _np
+    if _np is None:
+        import numpy
+        _np = numpy
+    return _np
 
 if TYPE_CHECKING:
     import numpy as np
@@ -55,6 +78,14 @@ class DRSBot:
     
     # Daily restart timezone (UTC+1)
     DAILY_RESTART_TIMEZONE = timezone(timedelta(hours=1))
+    
+    # Delay constants (seconds)
+    ERROR_RECOVERY_DELAY = 3
+    FUEL_RETRY_DELAY = 10
+    POST_CLICK_DELAY = 2
+    ADB_LAUNCH_VERIFY_DELAY = 10
+    DISCONNECT_RETRY_DELAY = 5
+    ERROR_REPEAT_DELAY = 3
     
     def __init__(self, config: Config):
         self.config = config
@@ -182,13 +213,6 @@ class DRSBot:
             self.window.adb.stop_app(self.config.package_name)
             await asyncio.sleep(2)
         
-        # Clear app cache to free memory
-        self.log("Clearing app cache...", "INFO")
-        if self.window.adb.clear_app_cache(self.config.package_name):
-            self.log("Cache cleared successfully", "INFO")
-        else:
-            self.log("Cache clear failed (may require root)", "WARNING")
-        
         # Launch the game
         self.log("Relaunching game...", "INFO")
         if not self.window.adb.launch_app(self.config.package_name):
@@ -217,7 +241,7 @@ class DRSBot:
         self.config.save_last_restart(now)
         
         # Verify game is running
-        if self.find_game(auto_launch=False):
+        if await self.find_game(auto_launch=False):
             self.log("Daily restart successful!", "INFO")
             
             # Capture post-restart screenshot
@@ -296,7 +320,7 @@ class DRSBot:
     
     def get_fuel(self, screen: Optional[np.ndarray] = None) -> Optional[int]:
         """Get current fuel level."""
-        import numpy as np
+        np = _get_np()
         
         if screen is None:
             screen = self.capture_screen()
@@ -335,7 +359,7 @@ class DRSBot:
             
             # Save debug crop
             if self.config.save_debug_images:
-                self._save_debug_crop(crop, "fuel_crop")
+                self._save_debug_image(crop, "fuel_crop")
 
             fuel = self.fuel_reader.read(crop)
             if fuel is not None:
@@ -343,19 +367,22 @@ class DRSBot:
                 return fuel
             else:
                 # Save failed crop for analysis
-                self._save_debug_crop(crop, "fuel_crop_FAILED")
+                self._save_debug_image(crop, "fuel_crop_FAILED")
         
         return None
     
-    def _save_debug_crop(self, crop: np.ndarray, prefix: str) -> None:
-        """Save a debug crop image."""
+    def _save_debug_image(self, image: np.ndarray, prefix: str, log_path: bool = False) -> None:
+        """Save a debug image (crop or screenshot)."""
         try:
-            import cv2
+            cv2 = _get_cv2()
             self.config.debug_dir.mkdir(exist_ok=True)
             timestamp = time.strftime("%H%M%S")
-            cv2.imwrite(str(self.config.debug_dir / f"{prefix}_{timestamp}.png"), crop)
+            path = self.config.debug_dir / f"{prefix}_{timestamp}.png"
+            cv2.imwrite(str(path), image)
+            if log_path:
+                self.log(f"Debug image saved: {path}")
         except (IOError, OSError) as e:
-            self.log(f"Failed to save debug crop: {e}", "DEBUG")
+            self.log(f"Failed to save debug image: {e}", "DEBUG")
     
     def detect_screen_state(self, screen: np.ndarray) -> ScreenState:
         """Detect current screen state."""
@@ -577,7 +604,7 @@ class DRSBot:
                 
                 # Save debug screenshot if enabled
                 if self.config.save_debug_images and screen is not None:
-                    self._save_debug_screenshot(screen, "fuel_wait")
+                    self._save_debug_image(screen, "fuel_wait", log_path=True)
                 
                 # Send Discord notification with screenshot
                 if self.config.discord_send_fuel_wait:
@@ -590,14 +617,16 @@ class DRSBot:
                         screenshot=screen
                     )
                 
-                # Wait with periodic checks
-                await self._fuel_wait(wait_secs)
+                # Wait with periodic checks (returns True if fuel detected early)
+                fuel_ready = await self._fuel_wait(wait_secs)
+                if fuel_ready:
+                    return True  # Fuel confirmed ready, no need to re-check
             else:
                 self.log("Can't read fuel, retrying...", "WARNING")
                 
                 # Save debug screenshot for failed fuel read
                 if self.config.save_debug_images and screen is not None:
-                    self._save_debug_screenshot(screen, "fuel_read_failed")
+                    self._save_debug_image(screen, "fuel_read_failed", log_path=True)
                 
                 # Send debug notification if enabled
                 if self.config.discord_send_errors:
@@ -616,10 +645,16 @@ class DRSBot:
         
         return False
     
-    async def _fuel_wait(self, total_secs: float) -> None:
-        """Wait for fuel with periodic status updates."""
+    async def _fuel_wait(self, total_secs: float) -> bool:
+        """
+        Wait for fuel with periodic status updates.
+        
+        Returns:
+            True if fuel is ready (detected early), False if wait completed normally.
+        """
         start = time.time()
         last_log = 0
+        last_check = 0
         check_interval = min(60, self.config.fuel_check_interval)
         
         while self.running and not self.paused:
@@ -627,7 +662,7 @@ class DRSBot:
             remaining = total_secs - elapsed
             
             if remaining <= 0:
-                break
+                return False  # Wait completed, fuel should be ready
             
             # Log every minute
             if int(elapsed) >= last_log + 60:
@@ -635,16 +670,19 @@ class DRSBot:
                 mins, secs = divmod(int(remaining), 60)
                 self.log(f"[WAIT] {mins}m {secs}s until fuel ready...")
             
-            # Periodic fuel check to catch OCR misreads
-            if int(elapsed) % int(check_interval) == 0 and elapsed > 0:
+            # Periodic fuel check to catch OCR misreads (only once per interval)
+            if elapsed >= last_check + check_interval:
+                last_check = elapsed
                 fuel = self.get_fuel()
                 if fuel is not None and fuel >= self.config.min_fuel:
                     self.log(f"[CHECK] Fuel ready early: {fuel}")
-                    return
+                    return True  # Fuel is ready
             
             await asyncio.sleep(1)
+        
+        return False  # Interrupted
     
-    def find_game(self, auto_launch: bool = True) -> bool:
+    async def find_game(self, auto_launch: bool = True) -> bool:
         """
         Find and verify game window.
         
@@ -669,7 +707,7 @@ class DRSBot:
                     # Wait for boot
                     wait_secs = self.config.boot_wait_seconds
                     self.log(f"Waiting {int(wait_secs)}s for game to boot...")
-                    time.sleep(wait_secs)
+                    await asyncio.sleep(wait_secs)
                     
                     # Try finding window again
                     window = self.window.find_window()
@@ -707,12 +745,12 @@ class DRSBot:
             
             # Save debug screenshot
             if self.config.save_debug_images:
-                self._save_debug_screenshot(screen, "game_not_detected")
+                self._save_debug_image(screen, "game_not_detected", log_path=True)
             
             # Launch the game
             if self.config.adb_enabled and self.window.adb:
                 self.window.adb.launch_app(self.config.package_name)
-                time.sleep(10)
+                await asyncio.sleep(10)
                 
                 # Recapture and verify
                 screen = self.capture_screen()
@@ -725,24 +763,14 @@ class DRSBot:
         
         # If still not found, save debug screenshot
         if self.config.save_debug_images and screen is not None:
-            self._save_debug_screenshot(screen, "game_not_found")
+            self._save_debug_image(screen, "game_not_found", log_path=True)
         
         self.log("Window found but game not detected - templates not matching", "WARNING")
         self.log("Check if game resolution changed or templates need updating", "WARNING")
         
         return False
     
-    def _save_debug_screenshot(self, screen: np.ndarray, name: str) -> None:
-        """Save a debug screenshot."""
-        try:
-            import cv2
-            self.config.debug_dir.mkdir(exist_ok=True)
-            timestamp = time.strftime("%H%M%S")
-            path = self.config.debug_dir / f"{name}_{timestamp}.png"
-            cv2.imwrite(str(path), screen)
-            self.log(f"Debug screenshot saved: {path}")
-        except (IOError, OSError) as e:
-            self.log(f"Failed to save debug screenshot: {e}", "WARNING")
+
     
     async def run(self) -> None:
         """Main bot loop."""
@@ -762,7 +790,7 @@ class DRSBot:
             return
         
         # Find game (will auto-launch if not running)
-        if not self.find_game():
+        if not await self.find_game():
             self.log("Could not find or launch the game. Check ADB connection.", "ERROR")
             return
         
@@ -820,7 +848,7 @@ class DRSBot:
                     
                     # Save debug screenshot
                     if self.config.save_debug_images:
-                        self._save_debug_screenshot(screen, "main_fuel_read_failed")
+                        self._save_debug_image(screen, "main_fuel_read_failed", log_path=True)
                     
                     # Send debug notification with screenshot
                     if self.config.discord_send_errors:
@@ -852,7 +880,6 @@ class DRSBot:
             self.log("Interrupted by user")
         except (RuntimeError, ValueError, OSError) as e:
             self.log(f"Error: {e}", "ERROR")
-            import traceback
             traceback.print_exc()
         finally:
             self.running = False
